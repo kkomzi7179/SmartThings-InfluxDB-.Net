@@ -1,18 +1,31 @@
 
 using Api.Database;
-using Microsoft.EntityFrameworkCore;
+using Api.Environments;
+using Api.Services;
+using Api.Services.Database;
+using Api.Services.Hosted;
 
-namespace Api
-{
-    public class Program
-    {
-        public static async Task Main(string[] args)
-        {
-            var builder = WebApplication.CreateBuilder(args);
+using Microsoft.EntityFrameworkCore;
+using Microsoft.OpenApi.Models;
+
+using Swashbuckle.AspNetCore.SwaggerUI;
+
+namespace Api {
+	public class Program {
+		const string CorsPolicyName = "CorsPolicyName";
+		const string Title = $"{ProductAppInfo.AppName} API";
+		const string Version = "v1";
+		const string Description = $"{ProductAppInfo.AppName} solution api server";
+		public static async Task Main(string[] args) {
+			var builder = WebApplication.CreateBuilder(args);
 
 			var dbConStr = builder.Configuration.GetConnectionString("DefaultConnection") ?? throw new InvalidOperationException("Connection string 'DefaultConnection' not found.");
 
 			// Add services to the container.
+
+			#region AddHttpClient
+			builder.Services.AddHttpClient();
+			#endregion
 
 			#region DB DbContext
 			builder.Services.AddDbContext<MyDbContext>(options => options.UseSqlServer(dbConStr)
@@ -27,25 +40,104 @@ namespace Api
 #endif
 			#endregion
 
+			#region Config
+			builder.Services.AddConfig(builder.Configuration);
+			#endregion
+
+			#region DB Service
+
+			builder.Services.AddTransient<IDbMemberService, DbMemberService>();
+
+			#endregion
+
+			#region Cors
+
+			builder.Services.AddCors(options => {
+				options.AddPolicy("CorsPolicyName",
+				builder => {
+					builder.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod();
+				});
+			});
+
+			#endregion
+
+			builder.Services.AddSingleton<ISmartThingsService, SmartThingsService>();
+			builder.Services.AddSingleton<IInfluxDbService, InfluxDbService>();
+
+			#region Hosted Service
+			builder.Services.AddHostedService<TokenRefreshWorker>();
+			builder.Services.AddHostedService<SmartThingsDataWorker>();
+			#endregion
+
 			builder.Services.AddControllers();
-            // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
-            builder.Services.AddOpenApi();
+			builder.Services.AddOpenApi();
 
-            var app = builder.Build();
+			#region Swagger
 
-            // Configure the HTTP request pipeline.
-            if (app.Environment.IsDevelopment())
-            {
-                app.MapOpenApi();
-            }
+			// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
+			builder.Services.AddEndpointsApiExplorer();
+			builder.Services.AddSwaggerGen(c => {
+				c.SwaggerDoc(Version,
+					new OpenApiInfo {
+						Title = Title,
+						Version = Version,
+						Description = Description,
+						Contact =
+							new OpenApiContact {
+								Name = ProductAppInfo.DeveloperName,
+								Email = ProductAppInfo.AdminEmail
+							}
+					}
+				);
+				// include all project's xml comments
+				var baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
+				foreach(var assembly in AppDomain.CurrentDomain.GetAssemblies()) {
+					if(!assembly.IsDynamic) {
+						var xmlFile = $"{assembly.GetName().Name}.xml";
+						var xmlPath = Path.Combine(baseDirectory, xmlFile);
+						if(File.Exists(xmlPath)) {
+							c.IncludeXmlComments(xmlPath);
+						}
+					}
+				}
 
-            app.UseHttpsRedirection();
+				c.UseInlineDefinitionsForEnums();
 
-            app.UseAuthorization();
+				c.UseAllOfToExtendReferenceSchemas();
+			});
+			#endregion
 
-            app.MapControllers();
+
+			var app = builder.Build();
+
+			// Configure the HTTP request pipeline.
+			if(app.Environment.IsDevelopment()) {
+				app.MapOpenApi();
+			}
+
+			#region Swagger + UI
+
+			app.UseSwagger();
+			app.UseSwaggerUI(c => {
+				c.SwaggerEndpoint($"{ProductAppInfo.SwaggerRoute}/{Version}/swagger.json", $"{Title} {Version}");
+				c.DisplayRequestDuration();
+				c.DocExpansion(DocExpansion.List);
+				c.EnableDeepLinking();
+				c.EnableFilter();
+				c.ShowExtensions();
+				c.ShowCommonExtensions();
+				c.EnableValidator();
+			});
+			#endregion
+
+			app.UseHttpsRedirection();
+
+			app.UseAuthorization();
+
+			app.MapControllers();
 
 			#region DB Initilize
+
 			using(var scope = app.Services.CreateScope()) {
 				var services = scope.ServiceProvider;
 				var context = services.GetRequiredService<MyDbContext>();
@@ -55,9 +147,17 @@ namespace Api
 				}
 				await DbInitializer.Initialize(context);
 			}
+
+			#endregion
+
+			#region SmartThingsService Init
+
+			var smartThingsService = app.Services.GetRequiredService<ISmartThingsService>();
+			await smartThingsService.Initialize();
+
 			#endregion
 
 			app.Run();
-        }
-    }
+		}
+	}
 }
